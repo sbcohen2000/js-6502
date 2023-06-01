@@ -1,4 +1,7 @@
-function initialMachineState() {
+const fs       = require('fs');
+const readline = require('node:readline');
+
+function createInitialMachineState() {
   const registerFile = new Uint8Array(7);
   const registers = {
     A:   registerFile[0], /* accumulator               */
@@ -9,7 +12,14 @@ function initialMachineState() {
     S:   registerFile[5], /* stack pointer             */
     P:   registerFile[6]  /* processor status register */
   }
-  const memory = new Uint8Array(65535);
+
+  /* Initialize program status register */
+  registers.P |= 0b00110110;
+
+  /* Initialze stack pointer */
+  registers.S = 0xFF;
+
+  const memory = new Uint8Array(2 ** 16);
 
   return { registers, memory, nCycles: 0 };
 }
@@ -154,7 +164,7 @@ function asZPX(address, state) {
    * instruction to form the effective address. */
   const zp = state.memory[address + 1];
   let operandAddress = 0; /* 16b */
-  operandAddress += zp + state.registers.X;
+  operandAddress += zp + asSigned8Bit(state.registers.X);
   return {
     nBytes: 2,
     OperandAddress: operandAddress
@@ -168,7 +178,7 @@ function asZPY(address, state) {
    * zero effective address. */
   const zp = state.memory[address + 1];
   let operandAddress = 0; /* 16b */
-  operandAddress += zp + state.registers.Y;
+  operandAddress += zp + asSigned8Bit(state.registers.Y);
   return {
     nBytes: 2,
     OperandAddress: operandAddress
@@ -184,7 +194,7 @@ function asABSX(address, state) {
   let operandAddress = 0; /* 16b */
   operandAddress  = adl;
   operandAddress += adh << 8;
-  const effectiveAddress = operandAddress[0] + state.registers.X;
+  const effectiveAddress = operandAddress + asSigned8Bit(state.registers.X);
   return {
     nBytes: 3,
     OperandAddress: effectiveAddress
@@ -200,7 +210,7 @@ function asABSY(address, state) {
   let operandAddress = 0; /* 16b */
   operandAddress  = adl;
   operandAddress += adh << 8;
-  const effectiveAddress = operandAddress[0] + state.registers.Y;
+  const effectiveAddress = operandAddress + asSigned8Bit(state.registers.Y);
   return {
     nBytes: 3,
     OperandAddress: effectiveAddress
@@ -222,14 +232,14 @@ function asRelative(address, state) {
    * met, the second byte of the instruction is added to the
    * Program Counter and program control is transferred to
    * this new memory location. */
-  const offset = state.memory[address + 1];
+  const offset = asSigned8Bit(state.memory[address + 1]);
   let pc = 0; /* 16b */
   pc  = state.registers.PCL;
   pc += state.registers.PCH << 8;
   const effectiveAddress = pc + offset;
   return {
     nBytes: 2,
-    NewPCValue: effectiveAddress
+    NewPCValue: effectiveAddress + 2
   }
 }
 
@@ -257,7 +267,7 @@ function asINDX(address, state) {
    * the indirect address. */
   const zp = state.memory[address + 1];
   /* FIXME: what if zp + state.registers.X is more than 0xFF? */
-  const indirectAddress = zp + state.registers.X;
+  const indirectAddress = zp + asSigned8Bit(state.registers.X);
   let operandAddress = 0; /* 16b */
   operandAddress += state.memory[indirectAddress];
   return {
@@ -274,7 +284,7 @@ function asINDY(address, state) {
    * added to the base address to form the effective address. */
   const zp = state.memory[address + 1];
   let indirectBaseAddress = state.memory[zp];
-  const operandAddress = indirectBaseAddress + state.registers.Y;
+  const operandAddress = indirectBaseAddress + asSigned8Bit(state.registers.Y);
   return {
     nBytes: 2,
     OperandAddress: operandAddress
@@ -320,15 +330,29 @@ function clamp8bits(number) {
   return number & 0xFF;
 }
 
+function asSigned8Bit(number) {
+  let n = clamp8bits(number);
+  if((n >> 7 & 1) === 1) {
+    n -= 2 ** 8;
+  }
+  return n;
+}
+
 function stepPC(state, bytes) {
   let pc = (state.registers.PCH << 8) + state.registers.PCL;
   pc = (pc + bytes) % 0xFFFF;
-  setPC(pc);
+  setPC(state, pc);
 }
 
 function setPC(state, newPC) {
   state.registers.PCL = newPC & 0xFF;
   state.registers.PCH = (newPC & 0xFF00) >> 8;
+}
+
+function pcAsInteger(state) {
+  let pc = state.registers.PCL;
+  pc += state.registers.PCH << 8;
+  return pc;
 }
 
 function incrementCycles(state, nCycles) {
@@ -348,7 +372,6 @@ function opADC(state, addr) {
   updateZ(state, sum);
   updateV(state, sum);
   state.registers.A = sum;
-
   stepPC(state, addr.nBytes);
 }
 
@@ -361,7 +384,6 @@ function opAND(state, addr) {
   updateN(state, and);
   updateZ(state, end);
   state.registers.A = and;
-
   stepPC(state, addr.nBytes);
 }
 
@@ -373,13 +395,12 @@ function opASL(state, addr) {
   updateN(state, lsl);
   updateZ(state, lsl);
   state.registers.A = lsl;
-
   stepPC(state, addr.nBytes);
 }
 
 function opBCC(state, addr) {
   if(!getCarry(state)) {
-    setPC(addr.NewPCValue);
+    setPC(state, addr.NewPCValue);
   } else {
     stepPC(state, addr.nBytes);
   }
@@ -387,7 +408,7 @@ function opBCC(state, addr) {
 
 function opBCS(state, addr) {
   if(getCarry(state)) {
-    setPC(addr.NewPCValue);
+    setPC(state, addr.NewPCValue);
   } else {
     stepPC(state, addr.nBytes);
   }
@@ -395,7 +416,7 @@ function opBCS(state, addr) {
 
 function opBEQ(state, addr) {
   if(getZero(state)) {
-    setPC(addr.NewPCValue);
+    setPC(state, addr.NewPCValue);
   } else {
     stepPC(state, addr.nBytes);
   }
@@ -408,7 +429,6 @@ function opBIT(state, addr) {
   updateZ(state, xor);
   setNegative(state, (M >> 7 & 1) === 1);
   setOverflow(state, (M >> 6 & 1) === 1);
-
   stepPC(addr.nBytes);
 }
 
@@ -457,19 +477,23 @@ function opBVS(state, addr) {
 }
 
 function opCLC(state, addr) {
-  throw new Error("TODO");
+  setCarry(state, false);
+  stepPC(state, addr.nBytes);
 }
 
 function opCLD(state, addr) {
-  throw new Error("TODO");
+  setDecimal(state, false);
+  stepPC(state, addr.nBytes);
 }
 
 function opCLI(state, addr) {
-  throw new Error("TODO");
+  setIRQDisable(state, false);
+  stepPC(state, addr.nBytes);
 }
 
 function opCLV(state, addr) {
-  throw new Error("TODO");
+  setOverflow(state, false);
+  stepPC(state, addr.nBytes);
 }
 
 function opCMP(state, addr) {
@@ -485,51 +509,108 @@ function opCPY(state, addr) {
 }
 
 function opDEC(state, addr) {
-  throw new Error("TODO");
+  const result = state.memory[addr.OperandAddress] =
+    clamp8bits(state.memory[addr.OperandAddress] - 1);
+  updateN(state, result);
+  updateZ(state, result);
+  stepPC(state, addr.nBytes);
 }
 
 function opDEX(state, addr) {
-  throw new Error("TODO");
+  state.registers.X = clamp8bits(state.registers.X - 1);
+  updateN(state, state.registers.X);
+  updateZ(state, state.registers.X);
+  stepPC(state, addr.nBytes);
 }
 
 function opDEY(state, addr) {
-  throw new Error("TODO");
+  state.registers.Y = clamp8bits(state.registers.Y - 1);
+  updateN(state, state.registers.Y);
+  updateZ(state, state.registers.Y);
+  stepPC(state, addr.nBytes);
 }
 
 function opEOR(state, addr) {
-  throw new Error("TODO");
+  const A = state.registers.A;
+  const M = addr.OperandAddress !== undefined
+          ? state.memory[addr.OperandAddress]
+          : addr.Operand;
+  const eor = A ^ M;
+  updateN(state, eor);
+  updateZ(state, eor);
+  state.registers.A = eor;
+  stepPC(state, addr.nBytes);
 }
 
 function opINC(state, addr) {
-  throw new Error("TODO");
+  const result = state.memory[addr.OperandAddress] =
+    clamp8bits(state.memory[addr.OperandAddress] + 1);
+  updateN(state, result);
+  updateZ(state, result);
+  stepPC(state, addr.nBytes);
 }
 
 function opINX(state, addr) {
-  throw new Error("TODO");
+  state.registers.X = clamp8bits(state.registers.X + 1);
+  updateN(state, state.registers.X);
+  updateZ(state, state.registers.X);
+  stepPC(state, addr.nBytes);
 }
 
 function opINY(state, addr) {
-  throw new Error("TODO");
+  state.registers.Y = clamp8bits(state.registers.Y + 1);
+  updateN(state, state.registers.Y);
+  updateZ(state, state.registers.Y);
+  stepPC(state, addr.nBytes);
 }
 
 function opJMP(state, addr) {
-  throw new Error("TODO");
+  const pc = addr.NewPCValue !== undefined
+           ? addr.NewPCValue
+           : addr.OperandAddress;
+  setPC(state, pc);
 }
 
 function opJSR(state, addr) {
-  throw new Error("TODO");
+  stepPC(state, addr.nBytes);
+  const pcMinusOne = pcAsInteger(state) - 1;
+  const PCL = pcMinusOne & 0x00FF;
+  const PCH = (pcMinusOne & 0xFF00) >> 8;
+  state.memory[state.registers.S] = PCL;
+  --state.registers.S;
+  state.memory[state.registers.S] = PCH;
+  --state.registers.S;
+  setPC(state, addr.OperandAddress);
 }
 
 function opLDA(state, addr) {
-  throw new Error("TODO");
+  const M = addr.OperandAddress !== undefined
+          ? state.memory[addr.OperandAddress]
+          : addr.Operand;
+  state.registers.A = M;
+  updateN(state, M);
+  updateZ(state, M);
+  stepPC(state, addr.nBytes);
 }
 
 function opLDX(state, addr) {
-  throw new Error("TODO");
+  const M = addr.OperandAddress !== undefined
+          ? state.memory[addr.OperandAddress]
+          : addr.Operand;
+  state.registers.X = M;
+  updateN(state, M);
+  updateZ(state, M);
+  stepPC(state, addr.nBytes);
 }
 
 function opLDY(state, addr) {
-  throw new Error("TODO");
+  const M = addr.OperandAddress !== undefined
+          ? state.memory[addr.OperandAddress]
+          : addr.Operand;
+  state.registers.Y = M;
+  updateN(state, M);
+  updateZ(state, M);
+  stepPC(state, addr.nBytes);
 }
 
 function opLSR(state, addr) {
@@ -537,11 +618,19 @@ function opLSR(state, addr) {
 }
 
 function opNOP(state, addr) {
-  throw new Error("TODO");
+  stepPC(state, addr.nBytes);
 }
 
 function opORA(state, addr) {
-  throw new Error("TODO");
+  const A = state.registers.A;
+  const M = addr.OperandAddress !== undefined
+          ? state.memory[addr.OperandAddress]
+          : addr.Operand;
+  const or = A | M;
+  updateN(state, or);
+  updateZ(state, or);
+  state.registers.A = or;
+  stepPC(state, addr.nBytes);
 }
 
 function opPHA(state, addr) {
@@ -589,54 +678,81 @@ function opSBC(state, addr) {
   updateZ(state, sum);
   updateV(state, sum);
   state.registers.A = sum;
+  stepPC(state, addr.nBytes);
 }
 
 function opSEC(state, addr) {
-  throw new Error("TODO");
+  setCarry(state, true);
+  stepPC(state, addr.nBytes);
 }
 
 function opSED(state, addr) {
-  throw new Error("TODO");
+  setDecimal(state, true);
+  stepPC(state, addr.nBytes);
 }
 
 function opSEI(state, addr) {
-  throw new Error("TODO");
+  setIRQDisable(state, true);
+  stepPC(state, addr.nBytes);
 }
 
 function opSTA(state, addr) {
-  throw new Error("TODO");
+  state.memory[addr.OperandAddress] = state.registers.A;
+  stepPC(state, addr.nBytes);
 }
 
 function opSTX(state, addr) {
-  throw new Error("TODO");
+  state.memory[addr.OperandAddress] = state.registers.X;
+  stepPC(state, addr.nBytes);
 }
 
 function opSTY(state, addr) {
-  throw new Error("TODO");
+  state.memory[addr.OperandAddress] = state.registers.Y;
+  stepPC(state, addr.nBytes);
 }
 
 function opTAX(state, addr) {
-  throw new Error("TODO");
+  state.registers.X = state.registers.A;
+  updateN(state, state.registers.X);
+  updateZ(state, state.registers.X);
+  stepPC(state, addr.nBytes);
 }
 
 function opTAY(state, addr) {
-  throw new Error("TODO");
+  state.registers.Y = state.registers.A;
+  updateN(state, state.registers.Y);
+  updateZ(state, state.registers.Y);
+  stepPC(state, addr.nBytes);
 }
 
 function opTSX(state, addr) {
-  throw new Error("TODO");
+  state.registers.X = state.registers.S;
+  updateN(state, state.registers.X);
+  updateZ(state, state.registers.X);
+
+  stepPC(state, addr.nBytes);
 }
 
 function opTXA(state, addr) {
-  throw new Error("TODO");
+  state.registers.A = state.registers.X;
+  updateN(state, state.registers.A);
+  updateZ(state, state.registers.A);
+
+  stepPC(state, addr.nBytes);
 }
 
 function opTXS(state, addr) {
-  throw new Error("TODO");
+  state.registers.S = state.registers.X;
+
+  stepPC(state, addr.nBytes);
 }
 
 function opTYA(state, addr) {
-  throw new Error("TODO");
+  state.registers.A = state.registers.Y;
+  updateN(state, state.registers.A);
+  updateZ(state, state.registers.A);
+
+  stepPC(state, addr.nBytes);
 }
 
 const opDecodeMatrix = [
@@ -929,3 +1045,93 @@ const opDecodeMatrix = [
     /* F       */ null
   ]
 ];
+
+function dumpState(state) {
+  const sp = () => process.stdout.write(" ");
+  process.stdout.write("PC   A  X  Y  S  [N V - B D I Z C]\n");
+  process.stdout.write(pcAsInteger(state).toString(16).padStart(4, '0'));
+  sp();
+  process.stdout.write(state.registers.A.toString(16).padStart(2, '0'));
+  sp();
+  process.stdout.write(state.registers.X.toString(16).padStart(2, '0'));
+  sp();
+  process.stdout.write(state.registers.Y.toString(16).padStart(2, '0'));
+  sp();
+  process.stdout.write(state.registers.S.toString(16).padStart(2, '0'));
+  sp(); sp();
+  const bToS = (b) => b ? "1" : "0";
+  process.stdout.write(bToS(getNegative(state)));
+  sp();
+  process.stdout.write(bToS(getOverflow(state)));
+  sp();
+  process.stdout.write("1");
+  sp();
+  process.stdout.write(bToS(getBrk(state)));
+  sp();
+  process.stdout.write(bToS(getDecimal(state)));
+  sp();
+  process.stdout.write(bToS(getIRQDisable(state)));
+  sp();
+  process.stdout.write(bToS(getZero(state)));
+  sp();
+  process.stdout.write(bToS(getCarry(state)));
+  process.stdout.write("\n");
+}
+
+if(process.argv.length <= 2) {
+  process.exit(1);
+}
+
+const fname = process.argv[2];
+const bin = fs.readFileSync(fname);
+
+const state = createInitialMachineState();
+
+if(bin.length > state.memory.length) {
+  process.stderr.write(
+    `binary file is too large to fit in memory. (${bin.length})\n`
+  );
+  process.exit(1);
+}
+
+const region = new Uint8Array(
+  bin.buffer,
+  bin.byteOffset,
+  bin.byteLength);
+
+state.memory.set(region, 0);
+
+state.registers.PCH = 0;
+state.registers.PCL = 0x0400;
+
+dumpState(state);
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  prompt: '>>> '
+});
+
+rl.prompt();
+
+rl.on('line', (cmd) => {
+  if(cmd === 'q') {
+    rl.close();
+  } else if(cmd === 's') {
+    const pc = pcAsInteger(state);
+    const instruction = state.memory[pc];
+    const msd = (instruction & 0xF0) >> 4;
+    const lsd = instruction & 0x0F;
+    const [op, addrMode] = opDecodeMatrix[msd][lsd];
+    const addr = addrMode(pc, state);
+    op(state, addr);
+    dumpState(state);
+  } else {
+    process.stdout.write(`unknown command "${cmd}"`);
+  }
+
+  rl.prompt();
+}).on('close', () => {
+  process.stdout.write("Goodbye.\n");
+  process.exit(0);
+});
