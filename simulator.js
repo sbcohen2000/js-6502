@@ -150,8 +150,7 @@ function asZP(address, state) {
    * instruction is the address of the operand in page
    * zero. */
   const zp = state.memory[address + 1];
-  let operandAddress = 0; /* 16b */
-  operandAddress += zp;
+  const operandAddress = zp;
   return {
     nBytes: 2,
     OperandAddress: operandAddress
@@ -163,8 +162,7 @@ function asZPX(address, state) {
    * Index Register is added to the second byte of
    * instruction to form the effective address. */
   const zp = state.memory[address + 1];
-  let operandAddress = 0; /* 16b */
-  operandAddress += zp + asSigned8Bit(state.registers.X);
+  const operandAddress = asByte(zp + state.registers.X);
   return {
     nBytes: 2,
     OperandAddress: operandAddress
@@ -177,8 +175,7 @@ function asZPY(address, state) {
    * which the Y Index Register is added to form the page
    * zero effective address. */
   const zp = state.memory[address + 1];
-  let operandAddress = 0; /* 16b */
-  operandAddress += zp + asSigned8Bit(state.registers.Y);
+  const operandAddress = asByte(zp + state.registers.Y);
   return {
     nBytes: 2,
     OperandAddress: operandAddress
@@ -194,7 +191,7 @@ function asABSX(address, state) {
   let operandAddress = 0; /* 16b */
   operandAddress  = adl;
   operandAddress += adh << 8;
-  const effectiveAddress = operandAddress + asSigned8Bit(state.registers.X);
+  const effectiveAddress = asWord(operandAddress + state.registers.X);
   return {
     nBytes: 3,
     OperandAddress: effectiveAddress
@@ -210,7 +207,7 @@ function asABSY(address, state) {
   let operandAddress = 0; /* 16b */
   operandAddress  = adl;
   operandAddress += adh << 8;
-  const effectiveAddress = operandAddress + asSigned8Bit(state.registers.Y);
+  const effectiveAddress = asWord(operandAddress + state.registers.Y);
   return {
     nBytes: 3,
     OperandAddress: effectiveAddress
@@ -232,30 +229,15 @@ function asRelative(address, state) {
    * met, the second byte of the instruction is added to the
    * Program Counter and program control is transferred to
    * this new memory location. */
-  const offset = asSigned8Bit(state.memory[address + 1]);
-  let pc = 0; /* 16b */
-  pc  = state.registers.PCL;
+  let offset = state.memory[address + 1];
+  if(offset >= 128) offset -= 256;
+
+  let pc = state.registers.PCL;
   pc += state.registers.PCH << 8;
-  const effectiveAddress = pc + offset;
+  const effectiveAddress = asWord(pc + offset);
   return {
     nBytes: 2,
     NewPCValue: effectiveAddress + 2
-  }
-}
-
-function asStack(address, state) {
-  /* The Stack may use memory from 0100 to 01FF and the
-   * effective address of the Stack address mode will always
-   * be within this range. Stack addressing refers to all
-   * instructions that push or pull data from the stack, such
-   * as Push, Pull, Jump to Subroutine, Return from Subroutine,
-   * Interrupts and Return from
-   * Interrupt. */
-  let operandAddress = 0; /* 16b */
-  operandAddress += 0x0100 + state.registers.S;
-  return {
-    nBytes: 1,
-    OperandAddress: operandAddress
   }
 }
 
@@ -266,10 +248,8 @@ function asINDX(address, state) {
    * Register is added and the result points to the low byte of
    * the indirect address. */
   const zp = state.memory[address + 1];
-  /* FIXME: what if zp + state.registers.X is more than 0xFF? */
-  const indirectAddress = zp + asSigned8Bit(state.registers.X);
-  let operandAddress = 0; /* 16b */
-  operandAddress += state.memory[indirectAddress];
+  const indirectAddress = asByte(zp + state.registers.X);
+  const operandAddress = state.memory[indirectAddress];
   return {
     nBytes: 2,
     OperandAddress: operandAddress
@@ -284,7 +264,7 @@ function asINDY(address, state) {
    * added to the base address to form the effective address. */
   const zp = state.memory[address + 1];
   let indirectBaseAddress = state.memory[zp];
-  const operandAddress = indirectBaseAddress + asSigned8Bit(state.registers.Y);
+  const operandAddress = asWord(indirectBaseAddress + state.registers.Y);
   return {
     nBytes: 2,
     OperandAddress: operandAddress
@@ -326,21 +306,17 @@ function updateV(state, number) {
   setOverflow(state, (bit6 ^ bit7) === 1);
 }
 
-function clamp8bits(number) {
+function asByte(number) {
   return number & 0xFF;
 }
 
-function asSigned8Bit(number) {
-  let n = clamp8bits(number);
-  if((n >> 7 & 1) === 1) {
-    n -= 2 ** 8;
-  }
-  return n;
+function asWord(number) {
+  return number & 0xFFFF;
 }
 
 function stepPC(state, bytes) {
   let pc = (state.registers.PCH << 8) + state.registers.PCL;
-  pc = (pc + bytes) % 0xFFFF;
+  pc = asWord(pc + bytes);
   setPC(state, pc);
 }
 
@@ -367,7 +343,7 @@ function opADC(state, addr) {
   const C = getCarry(state) ? 1 : 0;
   let sum = A + M + C;
   updateC(state, sum);
-  sum = clamp8bits(sum);
+  sum = asByte(sum);
   updateN(state, sum);
   updateZ(state, sum);
   updateV(state, sum);
@@ -391,7 +367,7 @@ function opASL(state, addr) {
   const M = state.memory[addr.OperandAddress];
   let lsl = M << 1;
   updateC(state, lsl);
-  lsl = clamp8bits(lsl);
+  lsl = asByte(lsl);
   updateN(state, lsl);
   updateZ(state, lsl);
   state.registers.A = lsl;
@@ -510,21 +486,21 @@ function opCPY(state, addr) {
 
 function opDEC(state, addr) {
   const result = state.memory[addr.OperandAddress] =
-    clamp8bits(state.memory[addr.OperandAddress] - 1);
+    asByte(state.memory[addr.OperandAddress] - 1);
   updateN(state, result);
   updateZ(state, result);
   stepPC(state, addr.nBytes);
 }
 
 function opDEX(state, addr) {
-  state.registers.X = clamp8bits(state.registers.X - 1);
+  state.registers.X = asByte(state.registers.X - 1);
   updateN(state, state.registers.X);
   updateZ(state, state.registers.X);
   stepPC(state, addr.nBytes);
 }
 
 function opDEY(state, addr) {
-  state.registers.Y = clamp8bits(state.registers.Y - 1);
+  state.registers.Y = asByte(state.registers.Y - 1);
   updateN(state, state.registers.Y);
   updateZ(state, state.registers.Y);
   stepPC(state, addr.nBytes);
@@ -544,21 +520,21 @@ function opEOR(state, addr) {
 
 function opINC(state, addr) {
   const result = state.memory[addr.OperandAddress] =
-    clamp8bits(state.memory[addr.OperandAddress] + 1);
+    asByte(state.memory[addr.OperandAddress] + 1);
   updateN(state, result);
   updateZ(state, result);
   stepPC(state, addr.nBytes);
 }
 
 function opINX(state, addr) {
-  state.registers.X = clamp8bits(state.registers.X + 1);
+  state.registers.X = asByte(state.registers.X + 1);
   updateN(state, state.registers.X);
   updateZ(state, state.registers.X);
   stepPC(state, addr.nBytes);
 }
 
 function opINY(state, addr) {
-  state.registers.Y = clamp8bits(state.registers.Y + 1);
+  state.registers.Y = asByte(state.registers.Y + 1);
   updateN(state, state.registers.Y);
   updateZ(state, state.registers.Y);
   stepPC(state, addr.nBytes);
@@ -673,7 +649,7 @@ function opSBC(state, addr) {
   const C = getCarry(state) ? 1 : 0;
   let sum = A + (~M) + C;
   updateC(state, sum);
-  sum = clamp8bits(sum);
+  sum = asByte(sum);
   updateN(state, sum);
   updateZ(state, sum);
   updateV(state, sum);
