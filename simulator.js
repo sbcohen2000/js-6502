@@ -2,15 +2,14 @@ const fs       = require('fs');
 const readline = require('node:readline');
 
 function createInitialMachineState() {
-  const registerFile = new Uint8Array(7);
   const registers = {
-    A:   registerFile[0], /* accumulator               */
-    Y:   registerFile[1], /* index register y          */
-    X:   registerFile[2], /* index register x          */
-    PCH: registerFile[3], /* program counter high      */
-    PCL: registerFile[4], /* program counter low       */
-    S:   registerFile[5], /* stack pointer             */
-    P:   registerFile[6]  /* processor status register */
+    A:   0, /* accumulator               */
+    Y:   0, /* index register y          */
+    X:   0, /* index register x          */
+    PCH: 0, /* program counter high      */
+    PCL: 0, /* program counter low       */
+    S:   0, /* stack pointer             */
+    P:   0  /* processor status register */
   }
 
   /* Initialize program status register */
@@ -28,7 +27,7 @@ function getNegative(state) {
   return (state.registers.P >> 7 & 1) === 1;
 }
 
-function setNegative(state, bit) {
+function setN(state, bit) {
   if(bit) {
     state.registers.P |= 1 << 7;
   } else {
@@ -40,7 +39,7 @@ function getOverflow(state) {
   return (state.registers.P >> 6 & 1) === 1;
 }
 
-function setOverflow(state, bit) {
+function setV(state, bit) {
   if(bit) {
     state.registers.P |= 1 << 6;
   } else {
@@ -52,7 +51,7 @@ function getBrk(state) {
   return (state.registers.P >> 4 & 1) === 1;
 }
 
-function setBrk(state, bit) {
+function setB(state, bit) {
   if(bit) {
     state.registers.P |= 1 << 4;
   } else {
@@ -64,7 +63,7 @@ function getDecimal(state) {
   return (state.registers.P >> 3 & 1) === 1;
 }
 
-function setDecimal(state, bit) {
+function setD(state, bit) {
   if(bit) {
     state.registers.P |= 1 << 3;
   } else {
@@ -76,7 +75,7 @@ function getIRQDisable(state) {
   return (state.registers.P >> 2 & 1) === 1;
 }
 
-function setIRQDisable(state, bit) {
+function setI(state, bit) {
   if(bit) {
     state.registers.P |= 1 << 2;
   } else {
@@ -88,7 +87,7 @@ function getZero(state) {
   return (state.registers.P >> 1 & 1) === 1;
 }
 
-function setZero(state, bit) {
+function setZ(state, bit) {
   if(bit) {
     state.registers.P |= 1 << 1;
   } else {
@@ -100,7 +99,7 @@ function getCarry(state) {
   return (state.registers.P & 1) === 1;
 }
 
-function setCarry(state, bit) {
+function setC(state, bit) {
   if(bit) {
     state.registers.P |= 1;
   } else {
@@ -289,21 +288,26 @@ function asIndirect(address, state) {
 }
 
 function updateN(state, number) {
-  setNegative(state, (number >> 7 & 1) === 1);
+  setN(state, (number >> 7 & 1) === 1);
 }
 
 function updateZ(state, number) {
-  setZero(state, number === 0);
+  setZ(state, number === 0);
 }
 
 function updateC(state, number) {
-  setCarry(state, (number & ~0xFF) !== 0);
+  setC(state, (number & ~0xFF) !== 0);
+}
+
+function updateB(state, number) {
+  updateC(state, number);
+  setC(state, !getCarry(state));
 }
 
 function updateV(state, number) {
   const bit6 = number >> 6 & 1;
   const bit7 = number >> 7 & 1;
-  setOverflow(state, (bit6 ^ bit7) === 1);
+  setV(state, (bit6 ^ bit7) === 1);
 }
 
 function asByte(number) {
@@ -364,7 +368,9 @@ function opAND(state, addr) {
 }
 
 function opASL(state, addr) {
-  const M = state.memory[addr.OperandAddress];
+  const M = addr.OperandAddress !== undefined
+          ? state.memory[addr.OperandAddress]
+          : state.registers.A;
   let lsl = M << 1;
   updateC(state, lsl);
   lsl = asByte(lsl);
@@ -403,8 +409,8 @@ function opBIT(state, addr) {
   const M = state.memory[addr.OperandAddress];
   let xor = A ^ M;
   updateZ(state, xor);
-  setNegative(state, (M >> 7 & 1) === 1);
-  setOverflow(state, (M >> 6 & 1) === 1);
+  setN(state, (M >> 7 & 1) === 1);
+  setV(state, (M >> 6 & 1) === 1);
   stepPC(addr.nBytes);
 }
 
@@ -432,8 +438,18 @@ function opBPL(state, addr) {
   }
 }
 
-function opBRK(state, addr) {
-  throw new Error("TODO");
+function opBRK(state, _addr) {
+  const pcPlusTwo = asWord(pcAsInteger(state) + 2);
+  const PCL = pcPlusTwo & 0x00FF;
+  const PCH = pcPlusTwo & 0xFF00 >> 8;
+  state.memory[0x0100 | state.registers.S] = PCL;
+  state.registers.S = asByte(state.registers.S - 1);
+  state.memory[0x0100 | state.registers.S] = PCH;
+  state.registers.S = asByte(state.registers.S - 1);
+  state.memory[0x0100 | state.registers.S] = state.registers.P;
+  state.registers.S = asByte(state.registers.S - 1);
+  state.registers.PCL = state.memory[0xFFFE];
+  state.registers.PCH = state.memory[0xFFFF];
 }
 
 function opBVC(state, addr) {
@@ -453,35 +469,53 @@ function opBVS(state, addr) {
 }
 
 function opCLC(state, addr) {
-  setCarry(state, false);
+  setC(state, false);
   stepPC(state, addr.nBytes);
 }
 
 function opCLD(state, addr) {
-  setDecimal(state, false);
+  setD(state, false);
   stepPC(state, addr.nBytes);
 }
 
 function opCLI(state, addr) {
-  setIRQDisable(state, false);
+  setI(state, false);
   stepPC(state, addr.nBytes);
 }
 
 function opCLV(state, addr) {
-  setOverflow(state, false);
+  setV(state, false);
   stepPC(state, addr.nBytes);
 }
 
 function opCMP(state, addr) {
-  throw new Error("TODO");
+  const A = state.registers.A;
+  // set borrow = 0
+  setC(state, true);
+  SBC(A, state, addr);
+  stepPC(state, addr.nBytes);
 }
 
 function opCPX(state, addr) {
-  throw new Error("TODO");
+  const X = state.registers.X;
+  const M = addr.OperandAddress !== undefined
+          ? state.memory[addr.OperandAddress]
+          : addr.Operand;
+  setN(state, (asByte(X - M) >> 7) === 1);
+  setZ(state, X === M);
+  setC(state, X >= M);
+  stepPC(state, addr.nBytes);
 }
 
 function opCPY(state, addr) {
-  throw new Error("TODO");
+  const Y = state.registers.Y;
+  const M = addr.OperandAddress !== undefined
+          ? state.memory[addr.OperandAddress]
+          : addr.Operand;
+  setN(state, (asByte(Y - M) >> 7) === 1);
+  setZ(state, M === Y);
+  setC(state, Y >= M);
+  stepPC(state, addr.nBytes);
 }
 
 function opDEC(state, addr) {
@@ -549,13 +583,13 @@ function opJMP(state, addr) {
 
 function opJSR(state, addr) {
   stepPC(state, addr.nBytes);
-  const pcMinusOne = pcAsInteger(state) - 1;
+  const pcMinusOne = asWord(pcAsInteger(state) - 1);
   const PCL = pcMinusOne & 0x00FF;
   const PCH = (pcMinusOne & 0xFF00) >> 8;
-  state.memory[state.registers.S] = PCL;
-  --state.registers.S;
-  state.memory[state.registers.S] = PCH;
-  --state.registers.S;
+  state.memory[0x0100 | state.registers.S] = PCL;
+  state.registers.S = asByte(state.registers.S - 1);
+  state.memory[0x0100 | state.registers.S] = PCH;
+  state.registers.S = asByte(state.registers.S - 1);
   setPC(state, addr.OperandAddress);
 }
 
@@ -590,6 +624,11 @@ function opLDY(state, addr) {
 }
 
 function opLSR(state, addr) {
+  if(addr.OperandAddress !== undefined) {
+
+  } else {
+
+  }
   throw new Error("TODO");
 }
 
@@ -610,65 +649,105 @@ function opORA(state, addr) {
 }
 
 function opPHA(state, addr) {
-  throw new Error("TODO");
+  state.memory[0x0100 | state.registers.S] = state.registers.A;
+  state.registers.S = asByte(state.registers.S - 1);
+  stepPC(state, addr.nBytes);
 }
 
 function opPHP(state, addr) {
-  throw new Error("TODO");
+  state.memory[0x0100 | state.registers.S] = state.registers.P;
+  state.registers.S = asByte(state.registers.S - 1);
+  stepPC(state, addr.nBytes);
 }
 
 function opPLA(state, addr) {
-  throw new Error("TODO");
+  state.registers.S = asByte(state.registers.S + 1);
+  state.registers.A = state.memory[0x0100 | state.registers.S];
+  updateN(state, state.registers.A);
+  updateZ(state, state.registers.A);
+  stepPC(state, addr.nBytes);
 }
 
 function opPLP(state, addr) {
-  throw new Error("TODO");
+  state.registers.S = asByte(state.registers.S + 1);
+  const status = state.memory[0x0100 | state.registers.S];
+  state.registers.P = status | 0b00100000;
+  stepPC(state, addr.nBytes);
 }
 
 function opROL(state, addr) {
+  if(addr.OperandAddress !== undefined) {
+
+  } else {
+
+  }
   throw new Error("TODO");
 }
 
 function opROR(state, addr) {
+  if(addr.OperandAddress !== undefined) {
+
+  } else {
+
+  }
   throw new Error("TODO");
 }
 
-function opRTI(state, addr) {
-  throw new Error("TODO");
+function opRTI(state, _addr) {
+  state.registers.S = asByte(state.registers.S + 1);
+  state.registers.P = state.memory[0x0100 | state.registers.S];
+  state.registers.S = asByte(state.registers.S + 1);
+  state.registers.PCH = state.memory[0x0100 | state.registers.S];
+  state.registers.S = asByte(state.registers.S + 1);
+  state.registers.PCL = state.memory[0x0100 | state.registers.S];
 }
 
-function opRTS(state, addr) {
-  throw new Error("TODO");
+function opRTS(state, _addr) {
+  state.registers.PCH = state.memory[0x0100 | state.registers.S];
+  state.registers.S = asByte(state.registers.S + 1);
+  state.registers.PCL = state.memory[0x0100 | state.registers.S];
+  state.registers.S = asByte(state.registers.S + 1);
+
+  const pcPlusOne = asWord(pcAsInteger(state) + 1);
+  state.registers.PCL = pcPlusOne & 0x00FF;
+  state.registers.PCH = pcPlusOne & 0xFF00;
 }
 
-function opSBC(state, addr) {
-  const A = state.registers.A;
+/* do the SBC operation taking the LHS byte as a parameter,
+ * and don't write out the result. Program counter is
+ * not incremented, but flags are updated. */
+function SBC(lhs, state, addr) {
   const M = addr.OperandAddress !== undefined
           ? state.memory[addr.OperandAddress]
           : addr.Operand;
   const C = getCarry(state) ? 1 : 0;
-  let sum = A + (~M) + C;
-  updateC(state, sum);
+  let sum = lhs + (~M) + C;
+  updateB(state, sum);
   sum = asByte(sum);
   updateN(state, sum);
   updateZ(state, sum);
   updateV(state, sum);
-  state.registers.A = sum;
+  return sum;
+}
+
+function opSBC(state, addr) {
+  const A = state.registers.A;
+  state.registers.A = SBC(A, state, addr);
   stepPC(state, addr.nBytes);
 }
 
 function opSEC(state, addr) {
-  setCarry(state, true);
+  setC(state, true);
   stepPC(state, addr.nBytes);
 }
 
 function opSED(state, addr) {
-  setDecimal(state, true);
+  setD(state, true);
   stepPC(state, addr.nBytes);
 }
 
 function opSEI(state, addr) {
-  setIRQDisable(state, true);
+  setI(state, true);
   stepPC(state, addr.nBytes);
 }
 
@@ -733,291 +812,291 @@ function opTYA(state, addr) {
 
 const opDecodeMatrix = [
   [ /* 0 (MSD) */
-    /* 0 (LSD) */ [opBRK, asImplied],
-    /* 1       */ [opORA, asINDX],
+    /* 0 (LSD) */ [opBRK, asImplied, "BRK Implied"],
+    /* 1       */ [opORA, asINDX,    "ORA INDX"],
     /* 2       */ null,
     /* 3       */ null,
     /* 4       */ null,
-    /* 5       */ [opORA, asZP],
-    /* 6       */ [opASL, asZP],
+    /* 5       */ [opORA, asZP,      "ORA ZP"],
+    /* 6       */ [opASL, asZP,      "ASL ZP"],
     /* 7       */ null,
-    /* 8       */ [opPHP, asImplied],
-    /* 9       */ [opORA, asIMM],
-    /* A       */ [opASL, asAccum],
+    /* 8       */ [opPHP, asImplied, "PHP Implied"],
+    /* 9       */ [opORA, asIMM,     "ORA IMM"],
+    /* A       */ [opASL, asAccum,   "ASL Accum"],
     /* B       */ null,
     /* C       */ null,
-    /* D       */ [opORA, asABS],
-    /* E       */ [opASL, asABS],
+    /* D       */ [opORA, asABS,     "ORA ABS"],
+    /* E       */ [opASL, asABS,     "ASL ABS"],
     /* F       */ null
   ],
   [ /* 1 */
-    /* 0 (LSD) */ [opBPL, asRelative],
-    /* 1       */ [opORA, asINDY],
+    /* 0 (LSD) */ [opBPL, asRelative, "BPL Relative"],
+    /* 1       */ [opORA, asINDY,     "ORA INDY"],
     /* 2       */ null,
     /* 3       */ null,
     /* 4       */ null,
-    /* 5       */ [opORA, asZPX],
-    /* 6       */ [opASL, asZPX],
+    /* 5       */ [opORA, asZPX,      "ORA ZPX"],
+    /* 6       */ [opASL, asZPX,      "ASL ZPX"],
     /* 7       */ null,
-    /* 8       */ [opCLC, asImplied],
-    /* 9       */ [opORA, asABSY],
+    /* 8       */ [opCLC, asImplied,  "CLC Implied"],
+    /* 9       */ [opORA, asABSY,     "ORA ABSY"],
     /* A       */ null,
     /* B       */ null,
     /* C       */ null,
-    /* D       */ [opORA, asABSX],
-    /* E       */ [opASL, asABSX],
+    /* D       */ [opORA, asABSX,     "ORA ABSX"],
+    /* E       */ [opASL, asABSX,     "ASL ABSX"],
     /* F       */ null
   ],
   [ /* 2 */
-    /* 0 (LSD) */ [opJSR, asABS],
-    /* 1       */ [opAND, asINDX],
+    /* 0 (LSD) */ [opJSR, asABS,     "JSR ABS"],
+    /* 1       */ [opAND, asINDX,    "AND INDX"],
     /* 2       */ null,
     /* 3       */ null,
-    /* 4       */ [opBIT, asZP],
-    /* 5       */ [opAND, asZP],
-    /* 6       */ [opROL, asZP],
+    /* 4       */ [opBIT, asZP,      "BIT ZP"],
+    /* 5       */ [opAND, asZP,      "AND ZP"],
+    /* 6       */ [opROL, asZP,      "ROL ZP"],
     /* 7       */ null,
-    /* 8       */ [opPLP, asImplied],
-    /* 9       */ [opAND, asIMM],
-    /* A       */ [opROL, asAccum],
+    /* 8       */ [opPLP, asImplied, "PLP Implied"],
+    /* 9       */ [opAND, asIMM,     "AND IMM"],
+    /* A       */ [opROL, asAccum,   "ROL Accum"],
     /* B       */ null,
-    /* C       */ [opBIT, asABS],
-    /* D       */ [opAND, asABS],
-    /* E       */ [opROL, asABS],
+    /* C       */ [opBIT, asABS,     "BIT ABS"],
+    /* D       */ [opAND, asABS,     "AND ABS"],
+    /* E       */ [opROL, asABS,     "ROL ABS"],
     /* F       */ null
   ],
   [ /* 3 */
-    /* 0 (LSD) */ [opBMI, asRelative],
-    /* 1       */ [opAND, asINDY],
+    /* 0 (LSD) */ [opBMI, asRelative, "BMI Relative"],
+    /* 1       */ [opAND, asINDY,     "AND INDY"],
     /* 2       */ null,
     /* 3       */ null,
     /* 4       */ null,
-    /* 5       */ [opAND, asZPX],
-    /* 6       */ [opROL, asZPX],
+    /* 5       */ [opAND, asZPX,      "AND ZPX"],
+    /* 6       */ [opROL, asZPX,      "ROL ZPX"],
     /* 7       */ null,
-    /* 8       */ [opSEC, asImplied],
-    /* 9       */ [opAND, asABSY],
+    /* 8       */ [opSEC, asImplied,  "SEC Implied"],
+    /* 9       */ [opAND, asABSY,     "AND ABSY"],
     /* A       */ null,
     /* B       */ null,
     /* C       */ null,
-    /* D       */ [opAND, asABSX],
-    /* E       */ [opROL, asABSX],
+    /* D       */ [opAND, asABSX,     "AND ABSX"],
+    /* E       */ [opROL, asABSX,     "ROL ABSX"],
     /* F       */ null
   ],
   [ /* 4 */
-    /* 0 (LSD) */ [opRTI, asImplied],
-    /* 1       */ [opEOR, asINDX],
+    /* 0 (LSD) */ [opRTI, asImplied, "RTI Implied"],
+    /* 1       */ [opEOR, asINDX,    "EOR INDX"],
     /* 2       */ null,
     /* 3       */ null,
     /* 4       */ null,
-    /* 5       */ [opEOR, asZP],
-    /* 6       */ [opLSR, asZP],
+    /* 5       */ [opEOR, asZP,      "EOR ZP"],
+    /* 6       */ [opLSR, asZP,      "LSR ZP"],
     /* 7       */ null,
-    /* 8       */ [opPHA, asImplied],
-    /* 9       */ [opEOR, asIMM],
-    /* A       */ [opLSR, asAccum],
+    /* 8       */ [opPHA, asImplied, "PHA Implied"],
+    /* 9       */ [opEOR, asIMM,     "EOR IMM"],
+    /* A       */ [opLSR, asAccum,   "LSR Accum"],
     /* B       */ null,
-    /* C       */ [opJMP, asABS],
-    /* D       */ [opEOR, asABS],
-    /* E       */ [opLSR, asABS],
+    /* C       */ [opJMP, asABS,     "JMP ABS"],
+    /* D       */ [opEOR, asABS,     "EOR ABS"],
+    /* E       */ [opLSR, asABS,     "LSR ABS"],
     /* F       */ null
   ],
   [ /* 5 */
-    /* 0 (LSD) */ [opBVC, asRelative],
-    /* 1       */ [opEOR, asINDY],
+    /* 0 (LSD) */ [opBVC, asRelative, "BVC Relative"],
+    /* 1       */ [opEOR, asINDY,     "EOR INDY"],
     /* 2       */ null,
     /* 3       */ null,
     /* 4       */ null,
-    /* 5       */ [opEOR, asZPX],
-    /* 6       */ [opLSR, asZPX],
+    /* 5       */ [opEOR, asZPX,      "EOR ZPX"],
+    /* 6       */ [opLSR, asZPX,      "LSR ZPX"],
     /* 7       */ null,
-    /* 8       */ [opCLI, asImplied],
-    /* 9       */ [opEOR, asABSY],
+    /* 8       */ [opCLI, asImplied,  "CLI Implied"],
+    /* 9       */ [opEOR, asABSY,     "EOR ABSY"],
     /* A       */ null,
     /* B       */ null,
     /* C       */ null,
-    /* D       */ [opEOR, asABSX],
-    /* E       */ [opLSR, asABSX],
+    /* D       */ [opEOR, asABSX,     "EOR ABSX"],
+    /* E       */ [opLSR, asABSX,     "LSR ABSX"],
     /* F       */ null
   ],
   [ /* 6 */
-    /* 0 (LSD) */ [opRTS, asImplied],
-    /* 1       */ [opADC, asINDX],
+    /* 0 (LSD) */ [opRTS, asImplied,  "RTS Implied"],
+    /* 1       */ [opADC, asINDX,     "ADC INDX"],
     /* 2       */ null,
     /* 3       */ null,
     /* 4       */ null,
-    /* 5       */ [opADC, asZP],
-    /* 6       */ [opROR, asZP],
+    /* 5       */ [opADC, asZP,       "ADC ZP"],
+    /* 6       */ [opROR, asZP,       "ROR ZP"],
     /* 7       */ null,
-    /* 8       */ [opPLA, asImplied],
-    /* 9       */ [opADC, asIMM],
-    /* A       */ [opROR, asAccum],
+    /* 8       */ [opPLA, asImplied,  "PLA Implied"],
+    /* 9       */ [opADC, asIMM,      "ADC IMM"],
+    /* A       */ [opROR, asAccum,    "ROR Accum"],
     /* B       */ null,
-    /* C       */ [opJMP, asIndirect],
-    /* D       */ [opADC, asABS],
-    /* E       */ [opROR, asABS],
+    /* C       */ [opJMP, asIndirect, "JMP Indirect"],
+    /* D       */ [opADC, asABS,      "ADC ABS"],
+    /* E       */ [opROR, asABS,      "ROR ABS"],
     /* F       */ null
   ],
   [ /* 7 */
-    /* 0 (LSD) */ [opBVS, asRelative],
-    /* 1       */ [opADC, asINDY],
+    /* 0 (LSD) */ [opBVS, asRelative, "BVS Relative"],
+    /* 1       */ [opADC, asINDY,     "ADC INDY"],
     /* 2       */ null,
     /* 3       */ null,
     /* 4       */ null,
-    /* 5       */ [opADC, asZPX],
-    /* 6       */ [opROR, asZPX],
+    /* 5       */ [opADC, asZPX,      "ADC ZPX"],
+    /* 6       */ [opROR, asZPX,      "ROR ZPX"],
     /* 7       */ null,
-    /* 8       */ [opSEI, asImplied],
-    /* 9       */ [opADC, asABSY],
+    /* 8       */ [opSEI, asImplied,  "SEI Implied"],
+    /* 9       */ [opADC, asABSY,     "ADC ABSY"],
     /* A       */ null,
     /* B       */ null,
     /* C       */ null,
-    /* D       */ [opADC, asABSX],
-    /* E       */ [opROR, asABSX],
+    /* D       */ [opADC, asABSX,     "ADC ABSX"],
+    /* E       */ [opROR, asABSX,     "ROR ABSX"],
     /* F       */ null
   ],
   [ /* 8 */
     /* 0 (LSD) */ null,
-    /* 1       */ [opSTA, asINDX],
+    /* 1       */ [opSTA, asINDX,    "STA INDX"],
     /* 2       */ null,
     /* 3       */ null,
-    /* 4       */ [opSTY, asZP],
-    /* 5       */ [opSTA, asZP],
-    /* 6       */ [opSTX, asZP],
+    /* 4       */ [opSTY, asZP,      "STY ZP"],
+    /* 5       */ [opSTA, asZP,      "STA ZP"],
+    /* 6       */ [opSTX, asZP,      "STX ZP"],
     /* 7       */ null,
-    /* 8       */ [opDEY, asImplied],
+    /* 8       */ [opDEY, asImplied, "DEY Implied"],
     /* 9       */ null,
-    /* A       */ [opTXA, asImplied],
+    /* A       */ [opTXA, asImplied, "TXA Implied"],
     /* B       */ null,
-    /* C       */ [opSTY, asABS],
-    /* D       */ [opSTA, asABS],
-    /* E       */ [opSTX, asABS],
+    /* C       */ [opSTY, asABS,     "STY ABS"],
+    /* D       */ [opSTA, asABS,     "STA ABS"],
+    /* E       */ [opSTX, asABS,     "STX ABS"],
     /* F       */ null
   ],
   [ /* 9 */
-    /* 0 (LSD) */ [opBCC, asRelative],
-    /* 1       */ [opSTA, asINDY],
+    /* 0 (LSD) */ [opBCC, asRelative, "BCC Relative"],
+    /* 1       */ [opSTA, asINDY,     "STA INDY"],
     /* 2       */ null,
     /* 3       */ null,
-    /* 4       */ [opSTY, asZPX],
-    /* 5       */ [opSTA, asZPX],
-    /* 6       */ [opSTX, asZPY],
+    /* 4       */ [opSTY, asZPX,      "STY ZPX"],
+    /* 5       */ [opSTA, asZPX,      "STA ZPX"],
+    /* 6       */ [opSTX, asZPY,      "STX ZPY"],
     /* 7       */ null,
-    /* 8       */ [opTYA, asImplied],
-    /* 9       */ [opSTA, asABSY],
-    /* A       */ [opTXS, asImplied],
+    /* 8       */ [opTYA, asImplied,  "TYA Implied"],
+    /* 9       */ [opSTA, asABSY,     "STA ABSY"],
+    /* A       */ [opTXS, asImplied,  "TXS Implied"],
     /* B       */ null,
     /* C       */ null,
-    /* D       */ [opSTA, asABSX],
+    /* D       */ [opSTA, asABSX,     "STA ABSX"],
     /* E       */ null,
     /* F       */ null
   ],
   [ /* A */
-    /* 0 (LSD) */ [opLDY, asIMM],
-    /* 1       */ [opLDA, asINDX],
-    /* 2       */ [opLDX, asIMM],
+    /* 0 (LSD) */ [opLDY, asIMM,     "LDY IMM"],
+    /* 1       */ [opLDA, asINDX,    "LDA INDX"],
+    /* 2       */ [opLDX, asIMM,     "LDX IMM"],
     /* 3       */ null,
-    /* 4       */ [opLDY, asZP],
-    /* 5       */ [opLDA, asZP],
-    /* 6       */ [opLDX, asZP],
+    /* 4       */ [opLDY, asZP,      "LDY ZP"],
+    /* 5       */ [opLDA, asZP,      "LDA ZP"],
+    /* 6       */ [opLDX, asZP,      "LDX ZP"],
     /* 7       */ null,
-    /* 8       */ [opTAY, asImplied],
-    /* 9       */ [opLDA, asIMM],
-    /* A       */ [opTAX, asImplied],
+    /* 8       */ [opTAY, asImplied, "TAY Implied"],
+    /* 9       */ [opLDA, asIMM,     "LDA IMM"],
+    /* A       */ [opTAX, asImplied, "TAX Implied"],
     /* B       */ null,
-    /* C       */ [opLDY, asABS],
-    /* D       */ [opLDA, asABS],
-    /* E       */ [opLDX, asABS],
+    /* C       */ [opLDY, asABS,     "LDY ABS"],
+    /* D       */ [opLDA, asABS,     "LDA ABS"],
+    /* E       */ [opLDX, asABS,     "LDX ABS"],
     /* F       */ null
   ],
   [ /* B */
-    /* 0 (LSD) */ [opBCS, asRelative],
-    /* 1       */ [opLDA, asINDY],
+    /* 0 (LSD) */ [opBCS, asRelative, "BCS Relative"],
+    /* 1       */ [opLDA, asINDY,     "LDA INDY"],
     /* 2       */ null,
     /* 3       */ null,
-    /* 4       */ [opLDY, asZPX],
-    /* 5       */ [opLDA, asZPX],
-    /* 6       */ [opLDX, asZPY],
+    /* 4       */ [opLDY, asZPX,      "LDY ZPX"],
+    /* 5       */ [opLDA, asZPX,      "LDA ZPX"],
+    /* 6       */ [opLDX, asZPY,      "LDX ZPY"],
     /* 7       */ null,
-    /* 8       */ [opCLV, asImplied],
-    /* 9       */ [opLDA, asABSY],
-    /* A       */ [opTSX, asImplied],
+    /* 8       */ [opCLV, asImplied,  "CLV Implied"],
+    /* 9       */ [opLDA, asABSY,     "LDA ABSY"],
+    /* A       */ [opTSX, asImplied,  "TSX Implied"],
     /* B       */ null,
-    /* C       */ [opLDY, asABSX],
-    /* D       */ [opLDA, asABSX],
-    /* E       */ [opLDX, asABSY],
+    /* C       */ [opLDY, asABSX,     "LDY ABSX"],
+    /* D       */ [opLDA, asABSX,     "LDA ABSX"],
+    /* E       */ [opLDX, asABSY,     "LDX ABSY"],
     /* F       */ null
   ],
   [ /* C */
-    /* 0 (LSD) */ [opCPY, asIMM],
-    /* 1       */ [opCMP, asINDX],
+    /* 0 (LSD) */ [opCPY, asIMM,     "CPY IMM"],
+    /* 1       */ [opCMP, asINDX,    "CMP INDX"],
     /* 2       */ null,
     /* 3       */ null,
-    /* 4       */ [opCPY, asZP],
-    /* 5       */ [opCMP, asZP],
-    /* 6       */ [opDEC, asZP],
+    /* 4       */ [opCPY, asZP,      "CPY ZP"],
+    /* 5       */ [opCMP, asZP,      "CMP ZP"],
+    /* 6       */ [opDEC, asZP,      "DEC ZP"],
     /* 7       */ null,
-    /* 8       */ [opINY, asImplied],
-    /* 9       */ [opCMP, asIMM],
-    /* A       */ [opDEX, asImplied],
+    /* 8       */ [opINY, asImplied, "INY Implied"],
+    /* 9       */ [opCMP, asIMM,     "CMP IMM"],
+    /* A       */ [opDEX, asImplied, "DEX Implied"],
     /* B       */ null,
-    /* C       */ [opCPY, asABS],
-    /* D       */ [opCMP, asABS],
-    /* E       */ [opDEC, asABS],
+    /* C       */ [opCPY, asABS,     "CPY ABS"],
+    /* D       */ [opCMP, asABS,     "CMP ABS"],
+    /* E       */ [opDEC, asABS,     "DEC ABS"],
     /* F       */ null
   ],
   [ /* D */
-    /* 0 (LSD) */ [opBNE, asRelative],
-    /* 1       */ [opCMP, asINDY],
+    /* 0 (LSD) */ [opBNE, asRelative, "BNE Relative"],
+    /* 1       */ [opCMP, asINDY,     "CMP INDY"],
     /* 2       */ null,
     /* 3       */ null,
     /* 4       */ null,
-    /* 5       */ [opCMP, asZPX],
-    /* 6       */ [opDEC, asZPX],
+    /* 5       */ [opCMP, asZPX,      "CMP ZPX"],
+    /* 6       */ [opDEC, asZPX,      "DEC ZPX"],
     /* 7       */ null,
-    /* 8       */ [opCLD, asImplied],
-    /* 9       */ [opCMP, asABSY],
+    /* 8       */ [opCLD, asImplied,  "CLD Implied"],
+    /* 9       */ [opCMP, asABSY,     "CMP ABSY"],
     /* A       */ null,
     /* B       */ null,
     /* C       */ null,
-    /* D       */ [opCMP, asABSX],
-    /* E       */ [opDEC, asABSX],
+    /* D       */ [opCMP, asABSX,     "CMP ABSX"],
+    /* E       */ [opDEC, asABSX,     "DEC ABSX"],
     /* F       */ null
   ],
   [ /* E */
-    /* 0 (LSD) */ [opCPX, asIMM],
-    /* 1       */ [opSBC, asINDX],
+    /* 0 (LSD) */ [opCPX, asIMM,     "CPX IMM"],
+    /* 1       */ [opSBC, asINDX,    "SBC INDX"],
     /* 2       */ null,
     /* 3       */ null,
-    /* 4       */ [opCPX, asZP],
-    /* 5       */ [opSBC, asZP],
-    /* 6       */ [opINC, asZP],
+    /* 4       */ [opCPX, asZP,      "CPX ZP"],
+    /* 5       */ [opSBC, asZP,      "SBC ZP"],
+    /* 6       */ [opINC, asZP,      "INC ZP"],
     /* 7       */ null,
-    /* 8       */ [opINX, asImplied],
-    /* 9       */ [opSBC, asIMM],
-    /* A       */ [opNOP, asImplied],
+    /* 8       */ [opINX, asImplied, "INX Implied"],
+    /* 9       */ [opSBC, asIMM,     "SBC IMM"],
+    /* A       */ [opNOP, asImplied, "NOP Implied"],
     /* B       */ null,
-    /* C       */ [opCPX, asABS],
-    /* D       */ [opSBC, asABS],
-    /* E       */ [opINC, asABS],
+    /* C       */ [opCPX, asABS,     "CPX ABS"],
+    /* D       */ [opSBC, asABS,     "SBC ABS"],
+    /* E       */ [opINC, asABS,     "INC ABS"],
     /* F       */ null
   ],
   [ /* F */
-    /* 0 (LSD) */ [opBEQ, asRelative],
-    /* 1       */ [opSBC, asINDY],
+    /* 0 (LSD) */ [opBEQ, asRelative, "BEQ Relative"],
+    /* 1       */ [opSBC, asINDY,     "SBC INDY"],
     /* 2       */ null,
     /* 3       */ null,
     /* 4       */ null,
-    /* 5       */ [opSBC, asZPX],
-    /* 6       */ [opINC, asZPX],
+    /* 5       */ [opSBC, asZPX,      "SBC ZPX"],
+    /* 6       */ [opINC, asZPX,      "INC ZPX"],
     /* 7       */ null,
-    /* 8       */ [opSED, asImplied],
-    /* 9       */ [opSBC, asABSY],
+    /* 8       */ [opSED, asImplied,  "SED Implied"],
+    /* 9       */ [opSBC, asABSY,     "SBC ABSY"],
     /* A       */ null,
     /* B       */ null,
     /* C       */ null,
-    /* D       */ [opSBC, asABSX],
-    /* E       */ [opINC, asABSX],
+    /* D       */ [opSBC, asABSX,     "SBC ABSX"],
+    /* E       */ [opINC, asABSX,     "INC ABSX"],
     /* F       */ null
   ]
 ];
@@ -1090,20 +1169,48 @@ const rl = readline.createInterface({
 
 rl.prompt();
 
+function step() {
+  const pc = pcAsInteger(state);
+  const instruction = state.memory[pc];
+  const msd = (instruction & 0xF0) >> 4;
+  const lsd = instruction & 0x0F;
+  const [op, addrMode, description] = opDecodeMatrix[msd][lsd];
+  const addr = addrMode(pc, state);
+  process.stdout.write("decoded " + description + "\n");
+  op(state, addr);
+  dumpState(state);
+}
+
 rl.on('line', (cmd) => {
-  if(cmd === 'q') {
-    rl.close();
-  } else if(cmd === 's') {
-    const pc = pcAsInteger(state);
-    const instruction = state.memory[pc];
-    const msd = (instruction & 0xF0) >> 4;
-    const lsd = instruction & 0x0F;
-    const [op, addrMode] = opDecodeMatrix[msd][lsd];
-    const addr = addrMode(pc, state);
-    op(state, addr);
-    dumpState(state);
-  } else {
-    process.stdout.write(`unknown command "${cmd}"`);
+  const tokens = cmd.split(' ');
+
+  let didParse = false;
+  if(tokens.length === 1) {
+    if(cmd === 'q') {
+      didParse = true;
+      rl.close();
+    } else if(cmd === 's') {
+      didParse = true;
+      step();
+    } else if(cmd === 'l') {
+      didParse = true;
+      let lastPC = null;
+      while(lastPC !== pcAsInteger(state)) {
+        lastPC = pcAsInteger(state);
+        step();
+      }
+    }
+  } else if(tokens.length === 2) {
+    if(tokens[0] === 's' && !isNaN(parseInt(tokens[1]))) {
+      didParse = true;
+      for(let i = 0; i <parseInt(tokens[1]); ++i) {
+        step();
+      }
+    }
+  }
+
+  if(!didParse) {
+    process.stdout.write(`unknown command "${cmd}"\n`);
   }
 
   rl.prompt();
