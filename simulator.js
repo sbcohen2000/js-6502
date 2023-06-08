@@ -95,7 +95,7 @@ function setZ(state, bit) {
   }
 }
 
-function getCarry(state) {
+function getC(state) {
   return (state.registers.P & 1) === 1;
 }
 
@@ -105,10 +105,6 @@ function setC(state, bit) {
   } else {
     state.registers.P &= ~1;
   }
-}
-
-function getBorrow(state) {
-  return !getCarry(state);
 }
 
 function asAccum(_address, _state) {
@@ -301,7 +297,7 @@ function updateC(state, number) {
 
 function updateB(state, number) {
   updateC(state, number);
-  setC(state, !getCarry(state));
+  setC(state, !getC(state));
 }
 
 function updateV(state, number) {
@@ -344,7 +340,7 @@ function opADC(state, addr) {
   const M = addr.OperandAddress !== undefined
           ? state.memory[addr.OperandAddress]
           : addr.Operand;
-  const C = getCarry(state) ? 1 : 0;
+  const C = getC(state) ? 1 : 0;
   let sum = A + M + C;
   updateC(state, sum);
   sum = asByte(sum);
@@ -381,7 +377,7 @@ function opASL(state, addr) {
 }
 
 function opBCC(state, addr) {
-  if(!getCarry(state)) {
+  if(!getC(state)) {
     setPC(state, addr.NewPCValue);
   } else {
     stepPC(state, addr.nBytes);
@@ -389,7 +385,7 @@ function opBCC(state, addr) {
 }
 
 function opBCS(state, addr) {
-  if(getCarry(state)) {
+  if(getC(state)) {
     setPC(state, addr.NewPCValue);
   } else {
     stepPC(state, addr.nBytes);
@@ -624,12 +620,18 @@ function opLDY(state, addr) {
 }
 
 function opLSR(state, addr) {
+  let M = addr.OperandAddress !== undefined
+        ? state.memory[addr.OperandAddress]
+        : state.registers.A;
+  setC((M & 1) === 1);
+  M = M >> 1 & 0b01111111;
   if(addr.OperandAddress !== undefined) {
-
+    state.memory[addr.OperandAddress] = M;
   } else {
-
+    state.registers.A = M;
   }
-  throw new Error("TODO");
+  setN(state, false);
+  updateZ(state, M);
 }
 
 function opNOP(state, addr) {
@@ -676,21 +678,35 @@ function opPLP(state, addr) {
 }
 
 function opROL(state, addr) {
+  let M = addr.OperandAddress !== undefined
+        ? state.memory[addr.OperandAddress]
+        : state.registers.A;
+  const msb = (M >> 7) === 1;
+  setN((M >> 6 & 1) === 1);
+  M = asByte(M << 1 & 0b11111110 | (getC(state) ? 1 : 0));
   if(addr.OperandAddress !== undefined) {
-
+    state.memory[addr.OperandAddress] = M;
   } else {
-
+    state.registers.A = M;
   }
-  throw new Error("TODO");
+  setC(state, msb);
+  updateZ(state, M);
 }
 
 function opROR(state, addr) {
+  let M = addr.OperandAddress !== undefined
+        ? state.memory[addr.OperandAddress]
+        : state.registers.A;
+  const lsb = (M & 1) === 1;
+  setN(state, getC(state));
+  M = asByte(M >> 1 & 0x01111111 | (getC(state) ? 1 : 0) << 7);
   if(addr.OperandAddress !== undefined) {
-
+    state.memory[addr.OperandAddress] = M;
   } else {
-
+    state.registers.A = M;
   }
-  throw new Error("TODO");
+  setC(state, lsb);
+  updateZ(state, M);
 }
 
 function opRTI(state, _addr) {
@@ -720,7 +736,7 @@ function SBC(lhs, state, addr) {
   const M = addr.OperandAddress !== undefined
           ? state.memory[addr.OperandAddress]
           : addr.Operand;
-  const C = getCarry(state) ? 1 : 0;
+  const C = getC(state) ? 1 : 0;
   let sum = lhs + (~M) + C;
   updateB(state, sum);
   sum = asByte(sum);
@@ -1129,7 +1145,7 @@ function dumpState(state) {
   sp();
   process.stdout.write(bToS(getZero(state)));
   sp();
-  process.stdout.write(bToS(getCarry(state)));
+  process.stdout.write(bToS(getC(state)));
   process.stdout.write("\n");
 }
 
