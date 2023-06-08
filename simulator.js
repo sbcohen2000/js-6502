@@ -272,14 +272,17 @@ function asIndirect(address, state) {
    * to a pointer. This address mode is only used with the JMP
    * instruction and the Program Counter is loaded
    * with the first and second bytes at this pointer */
-  const adl = state.memory[address + 1];
-  const adh = state.memory[address + 2];
-  let indirectAddress = 0; /* 16b */
-  indirectAddress  = adl;
-  indirectAddress += adh << 8;
+  const ial = state.memory[address + 1];
+  const iah = state.memory[address + 2];
+  let indirectAddress = ial;
+  indirectAddress += iah << 8;
+  const idl = state.memory[indirectAddress];
+  const idh = state.memory[asWord(indirectAddress + 1)];
+  let newpc = idl;
+  newpc += idh << 8;
   return {
     nBytes: 3,
-    NewPCValue: indirectAddress
+    NewPCValue: newpc
   }
 }
 
@@ -295,7 +298,7 @@ function updateC(state, number) {
   setC(state, (number & ~0xFF) !== 0);
 }
 
-function updateB(state, number) {
+function updateBorrow(state, number) {
   updateC(state, number);
   setC(state, !getC(state));
 }
@@ -437,15 +440,17 @@ function opBPL(state, addr) {
 function opBRK(state, _addr) {
   const pcPlusTwo = asWord(pcAsInteger(state) + 2);
   const PCL = pcPlusTwo & 0x00FF;
-  const PCH = pcPlusTwo & 0xFF00 >> 8;
-  state.memory[0x0100 | state.registers.S] = PCL;
-  state.registers.S = asByte(state.registers.S - 1);
+  const PCH = (pcPlusTwo & 0xFF00) >> 8;
   state.memory[0x0100 | state.registers.S] = PCH;
+  state.registers.S = asByte(state.registers.S - 1);
+  state.memory[0x0100 | state.registers.S] = PCL;
   state.registers.S = asByte(state.registers.S - 1);
   state.memory[0x0100 | state.registers.S] = state.registers.P;
   state.registers.S = asByte(state.registers.S - 1);
   state.registers.PCL = state.memory[0xFFFE];
   state.registers.PCH = state.memory[0xFFFF];
+  setB(state, true);
+  setI(state, true);
 }
 
 function opBVC(state, addr) {
@@ -582,9 +587,9 @@ function opJSR(state, addr) {
   const pcMinusOne = asWord(pcAsInteger(state) - 1);
   const PCL = pcMinusOne & 0x00FF;
   const PCH = (pcMinusOne & 0xFF00) >> 8;
-  state.memory[0x0100 | state.registers.S] = PCL;
-  state.registers.S = asByte(state.registers.S - 1);
   state.memory[0x0100 | state.registers.S] = PCH;
+  state.registers.S = asByte(state.registers.S - 1);
+  state.memory[0x0100 | state.registers.S] = PCL;
   state.registers.S = asByte(state.registers.S - 1);
   setPC(state, addr.OperandAddress);
 }
@@ -660,6 +665,7 @@ function opPHP(state, addr) {
   state.memory[0x0100 | state.registers.S] = state.registers.P;
   state.registers.S = asByte(state.registers.S - 1);
   stepPC(state, addr.nBytes);
+  setB(state, true);
 }
 
 function opPLA(state, addr) {
@@ -673,7 +679,8 @@ function opPLA(state, addr) {
 function opPLP(state, addr) {
   state.registers.S = asByte(state.registers.S + 1);
   const status = state.memory[0x0100 | state.registers.S];
-  state.registers.P = status | 0b00100000;
+  state.registers.P &= 0b00110000;
+  state.registers.P |= status & 0b11001111;
   stepPC(state, addr.nBytes);
 }
 
@@ -711,22 +718,22 @@ function opROR(state, addr) {
 
 function opRTI(state, _addr) {
   state.registers.S = asByte(state.registers.S + 1);
-  state.registers.P = state.memory[0x0100 | state.registers.S];
-  state.registers.S = asByte(state.registers.S + 1);
-  state.registers.PCH = state.memory[0x0100 | state.registers.S];
+  const status = state.memory[0x0100 | state.registers.S];
+  state.registers.P &= 0b00110000;
+  state.registers.P |= status & 0b11001111;
+
   state.registers.S = asByte(state.registers.S + 1);
   state.registers.PCL = state.memory[0x0100 | state.registers.S];
+  state.registers.S = asByte(state.registers.S + 1);
+  state.registers.PCH = state.memory[0x0100 | state.registers.S];
 }
 
 function opRTS(state, _addr) {
-  state.registers.PCH = state.memory[0x0100 | state.registers.S];
   state.registers.S = asByte(state.registers.S + 1);
   state.registers.PCL = state.memory[0x0100 | state.registers.S];
   state.registers.S = asByte(state.registers.S + 1);
-
-  const pcPlusOne = asWord(pcAsInteger(state) + 1);
-  state.registers.PCL = pcPlusOne & 0x00FF;
-  state.registers.PCH = pcPlusOne & 0xFF00;
+  state.registers.PCH = state.memory[0x0100 | state.registers.S];
+  stepPC(state, 1);
 }
 
 /* do the SBC operation taking the LHS byte as a parameter,
@@ -738,17 +745,17 @@ function SBC(lhs, state, addr) {
           : addr.Operand;
   const C = getC(state) ? 1 : 0;
   let sum = lhs + (~M) + C;
-  updateB(state, sum);
+  updateBorrow(state, sum);
   sum = asByte(sum);
   updateN(state, sum);
   updateZ(state, sum);
-  updateV(state, sum);
   return sum;
 }
 
 function opSBC(state, addr) {
   const A = state.registers.A;
   state.registers.A = SBC(A, state, addr);
+  updateV(state, sum);
   stepPC(state, addr.nBytes);
 }
 
@@ -1219,13 +1226,23 @@ rl.on('line', (cmd) => {
   } else if(tokens.length === 2) {
     if(tokens[0] === 's' && !isNaN(parseInt(tokens[1]))) {
       didParse = true;
-      for(let i = 0; i <parseInt(tokens[1]); ++i) {
+      for(let i = 0; i < parseInt(tokens[1]); ++i) {
         step();
       }
+    } else if(tokens[0] === 'l' && !isNaN(parseInt(tokens[1], 16))) {
+      didParse = true;
+      const stopPC = parseInt(tokens[1], 16);
+      while(stopPC !== pcAsInteger(state)) {
+        step();
+      }
+    } else if(tokens[0] === 'peek' && !isNaN(parseInt(tokens[1], 16))) {
+      didParse = true;
+      const addr = parseInt(tokens[1], 16);
+      process.stdout.write(state.memory[addr].toString(16) + "\n");
     }
   }
 
-  if(!didParse) {
+      if(!didParse) {
     process.stdout.write(`unknown command "${cmd}"\n`);
   }
 
