@@ -244,7 +244,8 @@ function asINDX(address, state) {
    * the indirect address. */
   const zp = state.memory[address + 1];
   const indirectAddress = asByte(zp + state.registers.X);
-  const operandAddress = state.memory[indirectAddress];
+  let operandAddress = state.memory[indirectAddress];
+  operandAddress += state.memory[indirectAddress + 1] << 8;
   return {
     nBytes: 2,
     OperandAddress: operandAddress
