@@ -319,6 +319,10 @@ function asWord(number) {
   return number & 0xFFFF;
 }
 
+function sign(number) {
+  return (number >> 7 & 1) === 1;
+}
+
 function stepPC(state, bytes) {
   let pc = (state.registers.PCH << 8) + state.registers.PCL;
   pc = asWord(pc + bytes);
@@ -351,7 +355,7 @@ function opADC(state, addr) {
   sum = asByte(sum);
   updateN(state, sum);
   updateZ(state, sum);
-  updateV(state, sum);
+  setV(state, sign(A) === sign(M + C) && sign(A) !== sign(sum));
   state.registers.A = sum;
   stepPC(state, addr.nBytes);
 }
@@ -363,21 +367,24 @@ function opAND(state, addr) {
           : addr.Operand;
   const and = A & M;
   updateN(state, and);
-  updateZ(state, end);
+  updateZ(state, and);
   state.registers.A = and;
   stepPC(state, addr.nBytes);
 }
 
 function opASL(state, addr) {
-  const M = addr.OperandAddress !== undefined
-          ? state.memory[addr.OperandAddress]
-          : state.registers.A;
-  let lsl = M << 1;
-  updateC(state, lsl);
-  lsl = asByte(lsl);
-  updateN(state, lsl);
-  updateZ(state, lsl);
-  state.registers.A = lsl;
+  let M = addr.OperandAddress !== undefined
+        ? state.memory[addr.OperandAddress]
+        : state.registers.A;
+  setC(state, (M >> 7 & 1) === 1);
+  M = asByte(M << 1);
+  updateN(state, M);
+  updateZ(state, M);
+  if(addr.OperandAddress !== undefined) {
+    state.memory[addr.OperandAddress] = M;
+  } else {
+    state.registers.A = M;
+  }
   stepPC(state, addr.nBytes);
 }
 
@@ -710,7 +717,8 @@ function opROR(state, addr) {
         : state.registers.A;
   const lsb = (M & 1) === 1;
   setN(state, getC(state));
-  M = asByte(M >> 1 & 0x01111111 | (getC(state) ? 1 : 0) << 7);
+  M =  asByte(M >> 1 & 0b01111111);
+  M |= (getC(state) ? 1 : 0) << 7;
   if(addr.OperandAddress !== undefined) {
     state.memory[addr.OperandAddress] = M;
   } else {
@@ -752,15 +760,17 @@ function SBC(lhs, state, addr) {
   let sum = lhs + (~M) + C;
   updateBorrow(state, sum);
   sum = asByte(sum);
+  const V = sign(lhs) === sign((~M) + C) && sign(lhs) !== sign(sum);
   updateN(state, sum);
   updateZ(state, sum);
-  return sum;
+  return [sum, V];
 }
 
 function opSBC(state, addr) {
   const A = state.registers.A;
-  state.registers.A = SBC(A, state, addr);
-  updateV(state, sum);
+  const [sum, V] = SBC(A, state, addr);
+  state.registers.A = sum;
+  setV(state, V);
   stepPC(state, addr.nBytes);
 }
 
@@ -1129,9 +1139,42 @@ const opDecodeMatrix = [
   ]
 ];
 
+let history = [];
+function saveState(state, description) {
+  history.unshift({ registers: { ...state.registers}, description });
+  if(history.length > 100) {
+    history.pop();
+  }
+}
+
+function viewLast() {
+  if(history.length === 0) {
+    process.stdout.write("empty\n");
+  } else {
+    dumpState(history[0]);
+  }
+}
+
+function dumpHistory(n) {
+  for(let i = history.length - 1; i >= 0; --i) {
+    if(n === 0) return;
+    dumpState(history[i]);
+    --n;
+  }
+}
+
+const muted     = '\u001b[38;5;245m';
+const highlight = '\u001b[94m';
+const reset     = '\u001b[39m';
+
+String.prototype.muted     = function () { return muted + this + reset };
+String.prototype.highlight = function () { return highlight + this + reset };
+
 function dumpState(state) {
+  process.stdout.write("decoded " + state.description.highlight() + "\n");
+
   const sp = () => process.stdout.write(" ");
-  process.stdout.write("PC   A  X  Y  S  [N V - B D I Z C]\n");
+  process.stdout.write("PC   A  X  Y  S  [N V - B D I Z C]\n".muted());
   process.stdout.write(pcAsInteger(state).toString(16).padStart(4, '0'));
   sp();
   process.stdout.write(state.registers.A.toString(16).padStart(2, '0'));
@@ -1187,8 +1230,6 @@ state.memory.set(region, 0);
 state.registers.PCH = 0;
 state.registers.PCL = 0x0400;
 
-dumpState(state);
-
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
@@ -1204,9 +1245,8 @@ function step() {
   const lsd = instruction & 0x0F;
   const [op, addrMode, description] = opDecodeMatrix[msd][lsd];
   const addr = addrMode(pc, state);
-  process.stdout.write("decoded " + description + "\n");
   op(state, addr);
-  dumpState(state);
+  saveState(state, description);
 }
 
 rl.on('line', (cmd) => {
@@ -1220,6 +1260,7 @@ rl.on('line', (cmd) => {
     } else if(cmd === 's') {
       didParse = true;
       step();
+      viewLast();
     } else if(cmd === 'l') {
       didParse = true;
       let lastPC = null;
@@ -1227,12 +1268,16 @@ rl.on('line', (cmd) => {
         lastPC = pcAsInteger(state);
         step();
       }
+    } else if(cmd === 'd') {
+      didParse = true;
+      dumpHistory(100);
     }
   } else if(tokens.length === 2) {
     if(tokens[0] === 's' && !isNaN(parseInt(tokens[1]))) {
       didParse = true;
       for(let i = 0; i < parseInt(tokens[1]); ++i) {
         step();
+        viewLast();
       }
     } else if(tokens[0] === 'l' && !isNaN(parseInt(tokens[1], 16))) {
       didParse = true;
@@ -1247,7 +1292,7 @@ rl.on('line', (cmd) => {
     }
   }
 
-      if(!didParse) {
+  if(!didParse) {
     process.stdout.write(`unknown command "${cmd}"\n`);
   }
 
