@@ -408,11 +408,11 @@ function opBEQ(state, addr) {
 function opBIT(state, addr) {
   const A = state.registers.A;
   const M = state.memory[addr.OperandAddress];
-  let xor = A ^ M;
-  updateZ(state, xor);
+  let and = A & M;
+  updateZ(state, and);
   setN(state, (M >> 7 & 1) === 1);
   setV(state, (M >> 6 & 1) === 1);
-  stepPC(addr.nBytes);
+  stepPC(state, addr.nBytes);
 }
 
 function opBMI(state, addr) {
@@ -630,7 +630,7 @@ function opLSR(state, addr) {
   let M = addr.OperandAddress !== undefined
         ? state.memory[addr.OperandAddress]
         : state.registers.A;
-  setC((M & 1) === 1);
+  setC(state, (M & 1) === 1);
   M = M >> 1 & 0b01111111;
   if(addr.OperandAddress !== undefined) {
     state.memory[addr.OperandAddress] = M;
@@ -639,6 +639,7 @@ function opLSR(state, addr) {
   }
   setN(state, false);
   updateZ(state, M);
+  stepPC(state, addr.nBytes);
 }
 
 function opNOP(state, addr) {
@@ -691,7 +692,7 @@ function opROL(state, addr) {
         ? state.memory[addr.OperandAddress]
         : state.registers.A;
   const msb = (M >> 7) === 1;
-  setN((M >> 6 & 1) === 1);
+  setN(state, (M >> 6 & 1) === 1);
   M = asByte(M << 1 & 0b11111110 | (getC(state) ? 1 : 0));
   if(addr.OperandAddress !== undefined) {
     state.memory[addr.OperandAddress] = M;
@@ -700,6 +701,7 @@ function opROL(state, addr) {
   }
   setC(state, msb);
   updateZ(state, M);
+  stepPC(state, addr.nBytes);
 }
 
 function opROR(state, addr) {
@@ -716,6 +718,7 @@ function opROR(state, addr) {
   }
   setC(state, lsb);
   updateZ(state, M);
+  stepPC(state, addr.nBytes);
 }
 
 function opRTI(state, _addr) {
