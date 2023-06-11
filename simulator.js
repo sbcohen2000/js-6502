@@ -259,6 +259,7 @@ function asINDY(address, state) {
    * added to the base address to form the effective address. */
   const zp = state.memory[address + 1];
   let indirectBaseAddress = state.memory[zp];
+  indirectBaseAddress += state.memory[zp + 1] << 8;
   const operandAddress = asWord(indirectBaseAddress + state.registers.Y);
   return {
     nBytes: 2,
