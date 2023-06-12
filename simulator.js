@@ -296,31 +296,12 @@ function updateZ(state, number) {
   setZ(state, number === 0);
 }
 
-function updateC(state, number) {
-  setC(state, (number & ~0xFF) !== 0);
-}
-
-function updateBorrow(state, number) {
-  updateC(state, number);
-  setC(state, !getC(state));
-}
-
-function updateV(state, number) {
-  const bit6 = number >> 6 & 1;
-  const bit7 = number >> 7 & 1;
-  setV(state, (bit6 ^ bit7) === 1);
-}
-
 function asByte(number) {
   return number & 0xFF;
 }
 
 function asWord(number) {
   return number & 0xFFFF;
-}
-
-function sign(number) {
-  return (number >> 7 & 1) === 1;
 }
 
 function stepPC(state, bytes) {
@@ -351,11 +332,11 @@ function opADC(state, addr) {
           : addr.Operand;
   const C = getC(state) ? 1 : 0;
   let sum = A + M + C;
-  updateC(state, sum);
+  setC(state, sum > 255);
   sum = asByte(sum);
+  setV(state, ((A^sum) & (M^sum) & 0x80) !== 0);
   updateN(state, sum);
   updateZ(state, sum);
-  setV(state, sign(A) === sign(M + C) && sign(A) !== sign(sum));
   state.registers.A = sum;
   stepPC(state, addr.nBytes);
 }
@@ -751,16 +732,18 @@ function opRTS(state, _addr) {
 
 /* do the SBC operation taking the LHS byte as a parameter,
  * and don't write out the result. Program counter is
- * not incremented, but flags are updated. */
+ * not incremented, but flags are updated.
+
+ * https://www.righto.com/2012/12/the-6502-overflow-flag-explained.html */
 function SBC(lhs, state, addr) {
   const M = addr.OperandAddress !== undefined
           ? state.memory[addr.OperandAddress]
           : addr.Operand;
-  const C = getC(state) ? 1 : 0;
-  let sum = lhs + (~M) + C;
-  updateBorrow(state, sum);
+  const CNot = getC(state) ? 0 : 1;
+  let sum = lhs - M - CNot;
+  setC(state, sum >= 0);
   sum = asByte(sum);
-  const V = sign(lhs) === sign((~M) + C) && sign(lhs) !== sign(sum);
+  const V = ((lhs^sum) & ((~M)^sum) & 0x80) !== 0;
   updateN(state, sum);
   updateZ(state, sum);
   return [sum, V];
@@ -1156,10 +1139,8 @@ function viewLast() {
 }
 
 function dumpHistory(n) {
-  for(let i = history.length - 1; i >= 0; --i) {
-    if(n === 0) return;
+  for(let i = Math.min(n, history.length - 1); i >= 0; --i) {
     dumpState(history[i]);
-    --n;
   }
 }
 
@@ -1289,10 +1270,14 @@ rl.on('line', (cmd) => {
       didParse = true;
       const addr = parseInt(tokens[1], 16);
       process.stdout.write(state.memory[addr].toString(16) + "\n");
+    } else if(tokens[0] === 'd' && !isNaN(parseInt(tokens[1], 16))) {
+      didParse = true;
+      const n = parseInt(tokens[1], 16);
+      dumpHistory(Math.min(n, 100));
     }
   }
 
-  if(!didParse) {
+      if(!didParse) {
     process.stdout.write(`unknown command "${cmd}"\n`);
   }
 
