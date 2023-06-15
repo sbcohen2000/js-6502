@@ -1208,8 +1208,8 @@ const region = new Uint8Array(
 
 state.memory.set(region, 0);
 
-state.registers.PCH = 0;
-state.registers.PCL = 0x0400;
+state.registers.PCL = state.memory[0xFFFC];
+state.registers.PCH = state.memory[0xFFFD];
 
 const rl = readline.createInterface({
   input: process.stdin,
